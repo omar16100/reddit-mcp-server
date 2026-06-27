@@ -1,0 +1,21 @@
+[package]
+name = "reddit-mcp-server"
+version = "0.1.0"
+edition = "2024"
+description = "Read-only Reddit MCP server: gives MCP clients (e.g. Claude Code) first-class Reddit read tools via app-only OAuth."
+license = "MIT"
+repository = "https://github.com/omar16100/reddit-mcp-server"
+keywords = ["mcp", "reddit", "rmcp", "model-context-protocol"]
+categories = ["api-bindings", "command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.103"
+base64 = "0.22.1"
+reqwest = { version = "0.13.4", features = ["json", "query"] }
+rmcp = { version = "1.8.0", features = ["server", "transport-io"] }
+schemars = "1.2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
