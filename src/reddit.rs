@@ -2,8 +2,8 @@
 //! cache, and the four read endpoints. The request-construction and auth/cache decisions
 //! are factored into pure functions so they can be unit-tested without network (TDD).
 
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -25,7 +25,9 @@ pub enum RedditError {
 impl std::fmt::Display for RedditError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RedditError::RateLimited { reset_secs } => write!(f, "rate limited; retry in ~{reset_secs}s"),
+            RedditError::RateLimited { reset_secs } => {
+                write!(f, "rate limited; retry in ~{reset_secs}s")
+            }
             RedditError::Http(m) => write!(f, "{m}"),
         }
     }
@@ -66,7 +68,14 @@ pub fn listing_request(sub: &str, sort: &str, limit: u32, time_filter: &str) -> 
 }
 
 /// Build the (path, query) for search (subreddit-scoped or site-wide).
-pub fn search_request(query: &str, sub: Option<&str>, sort: &str, time: &str, limit: u32, restrict_sr: bool) -> (String, Query) {
+pub fn search_request(
+    query: &str,
+    sub: Option<&str>,
+    sort: &str,
+    time: &str,
+    limit: u32,
+    restrict_sr: bool,
+) -> (String, Query) {
     let mut q: Query = vec![
         ("q", query.to_string()),
         ("sort", sort.to_string()),
@@ -96,7 +105,10 @@ pub fn comments_request(post_id: &str, sub: Option<&str>, limit: u32) -> (String
 
 /// Build the (path, query) for subreddit "about".
 pub fn about_request(sub: &str) -> (String, Query) {
-    (format!("/r/{}/about", norm_sub(sub)), vec![("raw_json", "1".into())])
+    (
+        format!("/r/{}/about", norm_sub(sub)),
+        vec![("raw_json", "1".into())],
+    )
 }
 
 // ── client ──────────────────────────────────────────────────────────────────────
@@ -110,11 +122,22 @@ pub struct RedditClient {
 
 impl RedditClient {
     pub fn from_env() -> Result<Self> {
-        let client_id = std::env::var("REDDIT_CLIENT_ID").map_err(|_| anyhow!("REDDIT_CLIENT_ID not set"))?;
-        let client_secret = std::env::var("REDDIT_CLIENT_SECRET").map_err(|_| anyhow!("REDDIT_CLIENT_SECRET not set"))?;
-        let user_agent = std::env::var("REDDIT_USER_AGENT").unwrap_or_else(|_| "rust:reddit-mcp:0.1 (read-only)".into());
-        let http = Client::builder().user_agent(user_agent).timeout(HTTP_TIMEOUT).build()?;
-        Ok(Self { http, client_id, client_secret, token: Mutex::new(None) })
+        let client_id =
+            std::env::var("REDDIT_CLIENT_ID").map_err(|_| anyhow!("REDDIT_CLIENT_ID not set"))?;
+        let client_secret = std::env::var("REDDIT_CLIENT_SECRET")
+            .map_err(|_| anyhow!("REDDIT_CLIENT_SECRET not set"))?;
+        let user_agent = std::env::var("REDDIT_USER_AGENT")
+            .unwrap_or_else(|_| "rust:reddit-mcp:0.1 (read-only)".into());
+        let http = Client::builder()
+            .user_agent(user_agent)
+            .timeout(HTTP_TIMEOUT)
+            .build()?;
+        Ok(Self {
+            http,
+            client_id,
+            client_secret,
+            token: Mutex::new(None),
+        })
     }
 
     async fn token(&self) -> Result<String, RedditError> {
@@ -128,7 +151,10 @@ impl RedditClient {
         let resp = self
             .http
             .post(TOKEN_URL)
-            .header("Authorization", format!("Basic {}", basic_auth(&self.client_id, &self.client_secret)))
+            .header(
+                "Authorization",
+                format!("Basic {}", basic_auth(&self.client_id, &self.client_secret)),
+            )
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body("grant_type=client_credentials")
             .send()
@@ -137,13 +163,25 @@ impl RedditClient {
         if !resp.status().is_success() {
             let code = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(RedditError::Http(format!("oauth token failed: HTTP {code}: {}", body.chars().take(200).collect::<String>())));
+            return Err(RedditError::Http(format!(
+                "oauth token failed: HTTP {code}: {}",
+                body.chars().take(200).collect::<String>()
+            )));
         }
-        let v: Value = resp.json().await.map_err(|e| RedditError::Http(e.to_string()))?;
-        let token = v["access_token"].as_str().ok_or_else(|| RedditError::Http("no access_token in response".into()))?.to_string();
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| RedditError::Http(e.to_string()))?;
+        let token = v["access_token"]
+            .as_str()
+            .ok_or_else(|| RedditError::Http("no access_token in response".into()))?
+            .to_string();
         let expires_in = v["expires_in"].as_u64().unwrap_or(3600);
         let expiry = Instant::now() + Duration::from_secs(expires_in).saturating_sub(TOKEN_SKEW);
-        *self.token.lock().await = Some(CachedToken { token: token.clone(), expiry });
+        *self.token.lock().await = Some(CachedToken {
+            token: token.clone(),
+            expiry,
+        });
         tracing::info!(expires_in, "fetched new app-only Reddit token");
         Ok(token)
     }
@@ -163,7 +201,10 @@ impl RedditClient {
                 .map_err(|e| RedditError::Http(e.to_string()))?;
             match resp.status() {
                 s if s.is_success() => {
-                    let v = resp.json::<Value>().await.map_err(|e| RedditError::Http(e.to_string()))?;
+                    let v = resp
+                        .json::<Value>()
+                        .await
+                        .map_err(|e| RedditError::Http(e.to_string()))?;
                     return Ok(Some(v));
                 }
                 StatusCode::UNAUTHORIZED if attempt == 0 => {
@@ -182,24 +223,46 @@ impl RedditClient {
                 }
                 s => {
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(RedditError::Http(format!("HTTP {s}: {}", body.chars().take(200).collect::<String>())));
+                    return Err(RedditError::Http(format!(
+                        "HTTP {s}: {}",
+                        body.chars().take(200).collect::<String>()
+                    )));
                 }
             }
         }
         Err(RedditError::Http("token refresh retry exhausted".into()))
     }
 
-    pub async fn get_listing(&self, sub: &str, sort: &str, limit: u32, time_filter: &str) -> Result<Option<Value>, RedditError> {
+    pub async fn get_listing(
+        &self,
+        sub: &str,
+        sort: &str,
+        limit: u32,
+        time_filter: &str,
+    ) -> Result<Option<Value>, RedditError> {
         let (path, q) = listing_request(sub, sort, limit, time_filter);
         self.get(&path, &q).await
     }
 
-    pub async fn search(&self, query: &str, sub: Option<&str>, sort: &str, time: &str, limit: u32, restrict_sr: bool) -> Result<Option<Value>, RedditError> {
+    pub async fn search(
+        &self,
+        query: &str,
+        sub: Option<&str>,
+        sort: &str,
+        time: &str,
+        limit: u32,
+        restrict_sr: bool,
+    ) -> Result<Option<Value>, RedditError> {
         let (path, q) = search_request(query, sub, sort, time, limit, restrict_sr);
         self.get(&path, &q).await
     }
 
-    pub async fn get_comments(&self, post_id: &str, sub: Option<&str>, limit: u32) -> Result<Option<Value>, RedditError> {
+    pub async fn get_comments(
+        &self,
+        post_id: &str,
+        sub: Option<&str>,
+        limit: u32,
+    ) -> Result<Option<Value>, RedditError> {
         let (path, q) = comments_request(post_id, sub, limit);
         self.get(&path, &q).await
     }
@@ -236,9 +299,15 @@ mod tests {
     fn cache_validity_honors_expiry() {
         let now = Instant::now();
         assert_eq!(valid_cached(&None, now), None);
-        let future = Some(CachedToken { token: "T".into(), expiry: now + Duration::from_secs(10) });
+        let future = Some(CachedToken {
+            token: "T".into(),
+            expiry: now + Duration::from_secs(10),
+        });
         assert_eq!(valid_cached(&future, now), Some("T".to_string()));
-        let past = Some(CachedToken { token: "T".into(), expiry: now - Duration::from_secs(1) });
+        let past = Some(CachedToken {
+            token: "T".into(),
+            expiry: now - Duration::from_secs(1),
+        });
         assert_eq!(valid_cached(&past, now), None);
     }
 

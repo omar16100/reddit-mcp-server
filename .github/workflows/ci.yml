@@ -13,18 +13,21 @@ env:
 
 jobs:
   test:
-    name: build, clippy, test
+    name: fmt, clippy, build, test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust (stable + clippy)
+      - name: Install Rust (stable + rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
 
       - name: Build
         run: cargo build --verbose

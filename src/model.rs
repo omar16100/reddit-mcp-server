@@ -13,17 +13,33 @@ const SELFTEXT_MAX: usize = 600;
 const COMMENT_BODY_MAX: usize = 500;
 
 // ── defaults for serde-defaulted params ─────────────────────────────────────────
-fn default_hot() -> String { "hot".into() }
-fn default_relevance() -> String { "relevance".into() }
-fn default_month() -> String { "month".into() }
-fn default_limit() -> u32 { 25 }
-fn default_comment_limit() -> u32 { 50 }
-fn default_true() -> bool { true }
+fn default_hot() -> String {
+    "hot".into()
+}
+fn default_relevance() -> String {
+    "relevance".into()
+}
+fn default_month() -> String {
+    "month".into()
+}
+fn default_limit() -> u32 {
+    25
+}
+fn default_comment_limit() -> u32 {
+    50
+}
+fn default_true() -> bool {
+    true
+}
 
 fn truncate(s: &str, n: usize) -> String {
     let mut chars = s.chars();
     let head: String = chars.by_ref().take(n).collect();
-    if chars.next().is_some() { format!("{head}…") } else { head }
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 // ── tool parameters (Deserialize + JsonSchema for the input schema) ─────────────
@@ -140,7 +156,9 @@ fn str_field(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
 }
 fn int_field(v: &Value, k: &str) -> i64 {
-    v.get(k).and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64))).unwrap_or(0)
+    v.get(k)
+        .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
+        .unwrap_or(0)
 }
 
 // ── mappers (raw Reddit JSON → compact) ─────────────────────────────────────────
@@ -156,7 +174,11 @@ pub fn post_summary(d: &Value) -> PostSummary {
         created_utc: int_field(d, "created_utc"),
         permalink: format!("{REDDIT}{}", str_field(d, "permalink")),
         url: str_field(d, "url"),
-        flair: d.get("link_flair_text").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+        flair: d
+            .get("link_flair_text")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         selftext: truncate(&str_field(d, "selftext"), SELFTEXT_MAX),
     }
 }
@@ -164,7 +186,10 @@ pub fn post_summary(d: &Value) -> PostSummary {
 /// A Listing response: `{ "data": { "children": [ { "data": {...} }, ... ] } }`.
 pub fn summarize_listing(v: Option<&Value>) -> Vec<PostSummary> {
     let mut out = Vec::new();
-    if let Some(children) = v.and_then(|v| v.pointer("/data/children")).and_then(Value::as_array) {
+    if let Some(children) = v
+        .and_then(|v| v.pointer("/data/children"))
+        .and_then(Value::as_array)
+    {
         for c in children {
             if let Some(d) = c.get("data") {
                 out.push(post_summary(d));
@@ -195,7 +220,11 @@ pub fn summarize_comments(v: Option<&Value>, limit: usize) -> CommentsResult {
         if let Some(p) = arr.first().and_then(|x| x.pointer("/data/children/0/data")) {
             post = Some(post_summary(p));
         }
-        if let Some(children) = arr.get(1).and_then(|x| x.pointer("/data/children")).and_then(Value::as_array) {
+        if let Some(children) = arr
+            .get(1)
+            .and_then(|x| x.pointer("/data/children"))
+            .and_then(Value::as_array)
+        {
             collect_comments(children, &mut comments, limit);
         }
     }
@@ -217,7 +246,11 @@ fn collect_comments(children: &[Value], out: &mut Vec<CommentSummary>, limit: us
             depth: int_field(d, "depth"),
             body: truncate(&str_field(d, "body"), COMMENT_BODY_MAX),
         });
-        if let Some(replies) = d.get("replies").and_then(|r| r.pointer("/data/children")).and_then(Value::as_array) {
+        if let Some(replies) = d
+            .get("replies")
+            .and_then(|r| r.pointer("/data/children"))
+            .and_then(Value::as_array)
+        {
             collect_comments(replies, out, limit);
         }
     }

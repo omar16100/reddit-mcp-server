@@ -50,16 +50,34 @@ fn tools_call_round_trip_returns_readable_content() {
                 let r = &v["result"];
                 assert_eq!(r["isError"].as_bool(), Some(false), "about isError");
                 // readable text block present (not just structuredContent)
-                let has_text = r["content"].as_array().map(|a| a.iter().any(|c| c["type"] == "text")).unwrap_or(false);
+                let has_text = r["content"]
+                    .as_array()
+                    .map(|a| a.iter().any(|c| c["type"] == "text"))
+                    .unwrap_or(false);
                 assert!(has_text, "about result needs a text content block");
-                assert_eq!(r.pointer("/structuredContent/subreddit/display_name").and_then(|x| x.as_str()), Some("rust"));
+                assert_eq!(
+                    r.pointer("/structuredContent/subreddit/display_name")
+                        .and_then(|x| x.as_str()),
+                    Some("rust")
+                );
                 about_ok = true;
             }
             Some(4) => {
                 let r = &v["result"];
-                assert_eq!(r["isError"].as_bool(), Some(false), "search isError (defaults must deserialize)");
-                let n = r.pointer("/structuredContent/posts").and_then(|p| p.as_array()).map(Vec::len).unwrap_or(0);
-                assert!(n > 0, "search with only `query` should return posts; got {n}");
+                assert_eq!(
+                    r["isError"].as_bool(),
+                    Some(false),
+                    "search isError (defaults must deserialize)"
+                );
+                let n = r
+                    .pointer("/structuredContent/posts")
+                    .and_then(|p| p.as_array())
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                assert!(
+                    n > 0,
+                    "search with only `query` should return posts; got {n}"
+                );
                 search_ok = true;
             }
             _ => {}
@@ -70,5 +88,8 @@ fn tools_call_round_trip_returns_readable_content() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    assert!(about_ok && search_ok, "missing responses: about_ok={about_ok} search_ok={search_ok}");
+    assert!(
+        about_ok && search_ok,
+        "missing responses: about_ok={about_ok} search_ok={search_ok}"
+    );
 }

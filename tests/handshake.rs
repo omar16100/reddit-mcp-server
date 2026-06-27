@@ -33,8 +33,8 @@ fn handshake_lists_the_four_read_tools_and_keeps_stdout_clean() {
             continue;
         }
         // Cardinal rule: every stdout line must be valid JSON-RPC, never stray text.
-        let v: serde_json::Value =
-            serde_json::from_str(&line).unwrap_or_else(|e| panic!("non-JSON on stdout: {e}: {line:?}"));
+        let v: serde_json::Value = serde_json::from_str(&line)
+            .unwrap_or_else(|e| panic!("non-JSON on stdout: {e}: {line:?}"));
         if let Some(tools) = v.pointer("/result/tools").and_then(|t| t.as_array()) {
             tool_names = tools
                 .iter()
@@ -44,8 +44,20 @@ fn handshake_lists_the_four_read_tools_and_keeps_stdout_clean() {
     }
     let _ = child.wait();
 
-    for expected in ["reddit_listing", "reddit_search", "reddit_comments", "reddit_subreddit_about"] {
-        assert!(tool_names.iter().any(|n| n == expected), "missing tool {expected}; got {tool_names:?}");
+    for expected in [
+        "reddit_listing",
+        "reddit_search",
+        "reddit_comments",
+        "reddit_subreddit_about",
+    ] {
+        assert!(
+            tool_names.iter().any(|n| n == expected),
+            "missing tool {expected}; got {tool_names:?}"
+        );
     }
-    assert_eq!(tool_names.len(), 4, "expected exactly 4 tools, got {tool_names:?}");
+    assert_eq!(
+        tool_names.len(),
+        4,
+        "expected exactly 4 tools, got {tool_names:?}"
+    );
 }
