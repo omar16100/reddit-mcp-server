@@ -4,6 +4,7 @@
 //! listing/comments JSON is huge, so every tool returns a trimmed shape (selftext/body
 //! truncated, only the fields an agent needs).
 
+use crate::guard;
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +12,8 @@ use serde_json::Value;
 const REDDIT: &str = "https://www.reddit.com";
 const SELFTEXT_MAX: usize = 600;
 const COMMENT_BODY_MAX: usize = 500;
+/// Upper bound for any other string field (titles, URLs, descriptions, …).
+const FIELD_MAX: usize = 2048;
 
 // ── defaults for serde-defaulted params ─────────────────────────────────────────
 fn default_hot() -> String {
@@ -152,8 +155,11 @@ pub struct AboutResult {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────────
+/// Every string from Reddit is untrusted user content: strip invisible/control characters
+/// (see [`guard::sanitize`]) and bound its length before it reaches the model.
 fn str_field(v: &Value, k: &str) -> String {
-    v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+    let raw = v.get(k).and_then(Value::as_str).unwrap_or("");
+    truncate(&guard::sanitize(raw), FIELD_MAX)
 }
 fn int_field(v: &Value, k: &str) -> i64 {
     v.get(k)
@@ -174,11 +180,7 @@ pub fn post_summary(d: &Value) -> PostSummary {
         created_utc: int_field(d, "created_utc"),
         permalink: format!("{REDDIT}{}", str_field(d, "permalink")),
         url: str_field(d, "url"),
-        flair: d
-            .get("link_flair_text")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+        flair: Some(str_field(d, "link_flair_text")).filter(|s| !s.is_empty()),
         selftext: truncate(&str_field(d, "selftext"), SELFTEXT_MAX),
     }
 }
@@ -260,6 +262,21 @@ fn collect_comments(children: &[Value], out: &mut Vec<CommentSummary>, limit: us
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn untrusted_fields_are_sanitized_and_bounded() {
+        let v = json!({"data":{"children":[
+            {"kind":"t3","data":{"id":"a1","title":"Hi\u{200B}\u{E0049}\u{E0047}\u{E004E}there",
+                "author":"u\u{202E}1","link_flair_text":"\u{200B}","url":"x".repeat(5000),
+                "selftext":"ok\u{FEFF}"}}
+        ]}});
+        let p = &summarize_listing(Some(&v))[0];
+        assert_eq!(p.title, "Hithere");
+        assert_eq!(p.author, "u1");
+        assert_eq!(p.flair, None); // empty once invisible chars are stripped
+        assert_eq!(p.url.chars().count(), FIELD_MAX + 1); // + ellipsis
+        assert_eq!(p.selftext, "ok");
+    }
 
     #[test]
     fn truncate_adds_ellipsis_only_when_cut() {

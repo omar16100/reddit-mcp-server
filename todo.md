@@ -21,7 +21,18 @@ Plan: [docs/27092026_rmcp2_security_deps_plan.md](docs/27092026_rmcp2_security_d
 - [x] Offline stdio smoke (network denied via macOS `sandbox-exec`): tools/list output identical to rmcp 1.8 for protocol versions 2024-11-05, 2025-06-18, 2025-11-25; an unknown version still negotiates 2025-11-25. tools/call error paths identical.
 - [x] rmcp 2.x protocol-edge deltas (details in the plan doc): no reply to non-JSON lines (was `-32700`), `-32600` for non-JSON-RPC objects, repeat `initialize` honours the requested version, malformed `task.ttl` gives `-32601` (was `-32602`), cancel-safe stdio reads. No expected impact on compliant clients.
 - [ ] Live Reddit `tools/call` (`cargo test --test call -- --ignored`) not re-run for this bump (needs creds + network). Run it once when convenient and rebuild the installed release binary.
-- [ ] `serverInfo` reports `{"name":"rmcp","version":"<rmcp version>"}` (inherited `ServerInfo::default()`), not this crate's name/version. Pre-existing; optional fix: set `info.server_info` from `CARGO_PKG_NAME`/`CARGO_PKG_VERSION`.
+- [x] `serverInfo` reports `{"name":"rmcp","version":"<rmcp version>"}` (inherited `ServerInfo::default()`), not this crate's name/version. Fixed in the security-hardening change: `server_info` is set from `CARGO_PKG_NAME`/`CARGO_PKG_VERSION`.
+
+## 2026-11-21: security hardening
+- [x] rmcp 2.1 -> 3.11 (clears RUSTSEC-2026-0457/0462; not reachable here, but advisory-free). `ServerInfo` -> `ServerConfig`.
+- [x] `cargo update`: rustls 0.23.46, rustls-webpki 0.103.17, webpki-root-certs 1.0.12, tokio 1.54.1, quinn-proto 0.11.19, quinn-udp 0.5.16.
+- [x] `src/guard.rs`: allow-list validation for every URL-bound argument (subreddit, post id, sort, time) + bounded search query; `InvalidInput` -> JSON-RPC `invalid_params`.
+- [x] Invisible/control-character stripping and a length bound on every string returned from Reddit; untrusted-content notice in tool descriptions + server instructions.
+- [x] Capped response bodies (8 MiB API, 64 KiB token, 4 KiB error excerpt).
+- [x] `tests/validation.rs`: injection-shaped args rejected before any request (offline).
+- [x] CI: actions pinned by SHA, `--locked`, `cargo audit` job + weekly schedule; `.github/dependabot.yml`.
+- [ ] chrono (RUSTSEC-2026-0543, unmaintained) is transitive via rmcp + schemars; nothing to do here until they drop it.
+- [ ] Live Reddit `tools/call` not re-run (needs creds + network).
 
 ## Output-schema gotcha (resolved)
 - MCP requires tool `outputSchema` root type = object. `Json<Vec<_>>` (array root) panics at startup → wrapped lists in `PostList { count, posts }` and about in `AboutResult { subreddit }`.
