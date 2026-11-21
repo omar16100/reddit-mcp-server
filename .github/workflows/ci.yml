@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # weekly, so new advisories against the lockfile surface
 
 permissions:
   contents: read
@@ -11,31 +13,57 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Third-party actions are pinned to full commit SHAs (tag in the trailing comment);
+# Dependabot keeps them current.
 jobs:
   test:
     name: fmt, clippy, build, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust (stable + rustfmt + clippy)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Format check
         run: cargo fmt --all --check
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --locked --verbose
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      # Runs unit + MCP handshake tests. The live/tools-call tests are #[ignore]
-      # (need Reddit creds + network), so no secrets are required in CI.
+      # Runs unit + MCP handshake + input-validation tests. The live/tools-call tests are
+      # #[ignore] (need Reddit creds + network), so no secrets are required in CI.
       - name: Test
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
+
+  audit:
+    name: cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Fails on any vulnerability advisory against Cargo.lock. "Unmaintained" notices
+      # (currently chrono, pulled in by rmcp and schemars) are reported as warnings.
+      - name: Audit Cargo.lock
+        run: cargo audit

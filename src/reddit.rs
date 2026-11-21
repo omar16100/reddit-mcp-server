@@ -1,10 +1,14 @@
 //! Read-only Reddit HTTP client: app-only OAuth (client_credentials), in-memory token
 //! cache, and the four read endpoints. The request-construction and auth/cache decisions
 //! are factored into pure functions so they can be unit-tested without network (TDD).
+//!
+//! Every value that reaches a request path is validated by [`crate::guard`] first, and
+//! every response body is read through a size cap.
 
+use crate::guard;
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Response, StatusCode};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -13,18 +17,30 @@ const TOKEN_URL: &str = "https://www.reddit.com/api/v1/access_token";
 const API_BASE: &str = "https://oauth.reddit.com";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN_SKEW: Duration = Duration::from_secs(60); // refresh this long before expiry
+/// Largest API response body we will buffer (a 500-comment thread is well under this).
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Largest OAuth token response body we will buffer.
+const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
+/// How much of an error response body to read, and how many characters of it to report.
+const ERROR_BODY_BYTES: usize = 4 * 1024;
+const ERROR_BODY_CHARS: usize = 200;
 
 type Query = Vec<(&'static str, String)>;
 
 #[derive(Debug)]
 pub enum RedditError {
-    RateLimited { reset_secs: u64 },
+    /// A tool argument failed validation; nothing was sent to Reddit.
+    InvalidInput(String),
+    RateLimited {
+        reset_secs: u64,
+    },
     Http(String),
 }
 
 impl std::fmt::Display for RedditError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RedditError::InvalidInput(m) => write!(f, "{m}"),
             RedditError::RateLimited { reset_secs } => {
                 write!(f, "rate limited; retry in ~{reset_secs}s")
             }
@@ -40,11 +56,6 @@ struct CachedToken {
 
 // ── pure helpers (unit-tested; no network) ──────────────────────────────────────
 
-/// Strip a leading `r/` if present.
-pub fn norm_sub(sub: &str) -> &str {
-    sub.strip_prefix("r/").unwrap_or(sub)
-}
-
 /// HTTP Basic credential value (without the "Basic " prefix).
 fn basic_auth(client_id: &str, client_secret: &str) -> String {
     STANDARD.encode(format!("{client_id}:{client_secret}"))
@@ -58,13 +69,22 @@ fn valid_cached(entry: &Option<CachedToken>, now: Instant) -> Option<String> {
     }
 }
 
+type Built = Result<(String, Query), RedditError>;
+
+fn invalid(m: String) -> RedditError {
+    RedditError::InvalidInput(m)
+}
+
 /// Build the (path, query) for a subreddit listing. `t` is only sent for time-windowed sorts.
-pub fn listing_request(sub: &str, sort: &str, limit: u32, time_filter: &str) -> (String, Query) {
+pub fn listing_request(sub: &str, sort: &str, limit: u32, time_filter: &str) -> Built {
+    let sub = guard::subreddit(sub).map_err(invalid)?;
+    let sort = guard::choice("sort", sort, guard::LISTING_SORTS).map_err(invalid)?;
     let mut q: Query = vec![("limit", limit.to_string()), ("raw_json", "1".into())];
     if matches!(sort, "top" | "controversial") {
-        q.push(("t", time_filter.to_string()));
+        let t = guard::choice("time_filter", time_filter, guard::TIME_FILTERS).map_err(invalid)?;
+        q.push(("t", t.to_string()));
     }
-    (format!("/r/{}/{}", norm_sub(sub), sort), q)
+    Ok((format!("/r/{sub}/{sort}"), q))
 }
 
 /// Build the (path, query) for search (subreddit-scoped or site-wide).
@@ -75,7 +95,10 @@ pub fn search_request(
     time: &str,
     limit: u32,
     restrict_sr: bool,
-) -> (String, Query) {
+) -> Built {
+    let query = guard::query(query).map_err(invalid)?;
+    let sort = guard::choice("sort", sort, guard::SEARCH_SORTS).map_err(invalid)?;
+    let time = guard::choice("time", time, guard::TIME_FILTERS).map_err(invalid)?;
     let mut q: Query = vec![
         ("q", query.to_string()),
         ("sort", sort.to_string()),
@@ -85,30 +108,81 @@ pub fn search_request(
     ];
     match sub {
         Some(s) => {
+            let s = guard::subreddit(s).map_err(invalid)?;
             q.push(("restrict_sr", if restrict_sr { "1" } else { "0" }.into()));
-            (format!("/r/{}/search", norm_sub(s)), q)
+            Ok((format!("/r/{s}/search"), q))
         }
-        None => ("/search".to_string(), q),
+        None => Ok(("/search".to_string(), q)),
     }
 }
 
 /// Build the (path, query) for a post's comment thread. Accepts a bare id or `t3_` fullname.
-pub fn comments_request(post_id: &str, sub: Option<&str>, limit: u32) -> (String, Query) {
-    let pid = post_id.strip_prefix("t3_").unwrap_or(post_id);
+pub fn comments_request(post_id: &str, sub: Option<&str>, limit: u32) -> Built {
+    let pid = guard::post_id(post_id).map_err(invalid)?;
     let q: Query = vec![("limit", limit.to_string()), ("raw_json", "1".into())];
     let path = match sub {
-        Some(s) => format!("/r/{}/comments/{pid}", norm_sub(s)),
+        Some(s) => format!(
+            "/r/{}/comments/{pid}",
+            guard::subreddit(s).map_err(invalid)?
+        ),
         None => format!("/comments/{pid}"),
     };
-    (path, q)
+    Ok((path, q))
 }
 
 /// Build the (path, query) for subreddit "about".
-pub fn about_request(sub: &str) -> (String, Query) {
-    (
-        format!("/r/{}/about", norm_sub(sub)),
-        vec![("raw_json", "1".into())],
-    )
+pub fn about_request(sub: &str) -> Built {
+    let sub = guard::subreddit(sub).map_err(invalid)?;
+    Ok((format!("/r/{sub}/about"), vec![("raw_json", "1".into())]))
+}
+
+/// Append `chunk` to `buf`, failing once the total would exceed `max` bytes.
+fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max: usize) -> Result<(), RedditError> {
+    if buf.len() + chunk.len() > max {
+        return Err(RedditError::Http(format!(
+            "response body exceeds {max} bytes; refusing to buffer it"
+        )));
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Read a response body, refusing anything larger than `max` bytes.
+async fn read_capped(mut resp: Response, max: usize) -> Result<Vec<u8>, RedditError> {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(RedditError::Http(format!(
+            "response body exceeds {max} bytes; refusing to buffer it"
+        )));
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| RedditError::Http(e.to_string()))?
+    {
+        push_capped(&mut buf, &chunk, max)?;
+    }
+    Ok(buf)
+}
+
+/// Read a capped JSON body.
+async fn read_json(resp: Response, max: usize) -> Result<Value, RedditError> {
+    let bytes = read_capped(resp, max).await?;
+    serde_json::from_slice(&bytes).map_err(|e| RedditError::Http(format!("invalid JSON: {e}")))
+}
+
+/// A short, sanitised excerpt of an error body (it is shown to the model).
+async fn error_excerpt(mut resp: Response) -> String {
+    let mut buf = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let room = ERROR_BODY_BYTES.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        if buf.len() >= ERROR_BODY_BYTES {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    guard::sanitize(&text.chars().take(ERROR_BODY_CHARS).collect::<String>())
 }
 
 // ── client ──────────────────────────────────────────────────────────────────────
@@ -162,16 +236,12 @@ impl RedditClient {
             .map_err(|e| RedditError::Http(e.to_string()))?;
         if !resp.status().is_success() {
             let code = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(RedditError::Http(format!(
                 "oauth token failed: HTTP {code}: {}",
-                body.chars().take(200).collect::<String>()
+                error_excerpt(resp).await
             )));
         }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| RedditError::Http(e.to_string()))?;
+        let v = read_json(resp, MAX_TOKEN_BODY_BYTES).await?;
         let token = v["access_token"]
             .as_str()
             .ok_or_else(|| RedditError::Http("no access_token in response".into()))?
@@ -201,11 +271,7 @@ impl RedditClient {
                 .map_err(|e| RedditError::Http(e.to_string()))?;
             match resp.status() {
                 s if s.is_success() => {
-                    let v = resp
-                        .json::<Value>()
-                        .await
-                        .map_err(|e| RedditError::Http(e.to_string()))?;
-                    return Ok(Some(v));
+                    return Ok(Some(read_json(resp, MAX_BODY_BYTES).await?));
                 }
                 StatusCode::UNAUTHORIZED if attempt == 0 => {
                     *self.token.lock().await = None; // force refresh, retry once
@@ -222,10 +288,9 @@ impl RedditClient {
                     return Err(RedditError::RateLimited { reset_secs: reset });
                 }
                 s => {
-                    let body = resp.text().await.unwrap_or_default();
                     return Err(RedditError::Http(format!(
                         "HTTP {s}: {}",
-                        body.chars().take(200).collect::<String>()
+                        error_excerpt(resp).await
                     )));
                 }
             }
@@ -240,7 +305,7 @@ impl RedditClient {
         limit: u32,
         time_filter: &str,
     ) -> Result<Option<Value>, RedditError> {
-        let (path, q) = listing_request(sub, sort, limit, time_filter);
+        let (path, q) = listing_request(sub, sort, limit, time_filter)?;
         self.get(&path, &q).await
     }
 
@@ -253,7 +318,7 @@ impl RedditClient {
         limit: u32,
         restrict_sr: bool,
     ) -> Result<Option<Value>, RedditError> {
-        let (path, q) = search_request(query, sub, sort, time, limit, restrict_sr);
+        let (path, q) = search_request(query, sub, sort, time, limit, restrict_sr)?;
         self.get(&path, &q).await
     }
 
@@ -263,12 +328,12 @@ impl RedditClient {
         sub: Option<&str>,
         limit: u32,
     ) -> Result<Option<Value>, RedditError> {
-        let (path, q) = comments_request(post_id, sub, limit);
+        let (path, q) = comments_request(post_id, sub, limit)?;
         self.get(&path, &q).await
     }
 
     pub async fn get_subreddit_about(&self, sub: &str) -> Result<Option<Value>, RedditError> {
-        let (path, q) = about_request(sub);
+        let (path, q) = about_request(sub)?;
         self.get(&path, &q).await
     }
 }
@@ -284,10 +349,52 @@ mod tests {
         q.iter().any(|(qk, _)| *qk == k)
     }
 
+    fn rejected(b: Built) -> bool {
+        matches!(b, Err(RedditError::InvalidInput(_)))
+    }
+
     #[test]
-    fn norm_sub_strips_prefix() {
-        assert_eq!(norm_sub("r/rust"), "rust");
-        assert_eq!(norm_sub("rust"), "rust");
+    fn builders_reject_path_injection() {
+        assert!(rejected(listing_request(
+            "../../api/v1/me",
+            "hot",
+            5,
+            "day"
+        )));
+        assert!(rejected(listing_request("rust", "hot/../../x", 5, "day")));
+        assert!(rejected(listing_request("rust", "top", 5, "week/../x")));
+        assert!(rejected(search_request(
+            "q",
+            Some("rust?x=1"),
+            "top",
+            "week",
+            5,
+            true
+        )));
+        assert!(rejected(search_request(
+            "q", None, "bogus", "week", 5, true
+        )));
+        assert!(rejected(search_request("q", None, "top", "bogus", 5, true)));
+        assert!(rejected(search_request("", None, "top", "week", 5, true)));
+        assert!(rejected(comments_request("1abc/../../api", None, 5)));
+        assert!(rejected(comments_request("1abc", Some("a/b"), 5)));
+        assert!(rejected(about_request("rust/../../message/inbox")));
+    }
+
+    #[test]
+    fn listing_ignores_time_filter_for_untimed_sorts() {
+        // An invalid time_filter is irrelevant (and not sent) for sorts that ignore it.
+        let (_, q) = listing_request("rust", "hot", 5, "bogus").unwrap();
+        assert!(!key(&q, "t"));
+    }
+
+    #[test]
+    fn push_capped_enforces_limit() {
+        let mut buf = Vec::new();
+        assert!(push_capped(&mut buf, b"abcd", 8).is_ok());
+        assert!(push_capped(&mut buf, b"efgh", 8).is_ok());
+        assert!(push_capped(&mut buf, b"i", 8).is_err());
+        assert_eq!(buf, b"abcdefgh");
     }
 
     #[test]
@@ -313,7 +420,7 @@ mod tests {
 
     #[test]
     fn listing_hot_has_no_time_filter() {
-        let (path, q) = listing_request("r/rust", "hot", 5, "month");
+        let (path, q) = listing_request("r/rust", "hot", 5, "month").unwrap();
         assert_eq!(path, "/r/rust/hot"); // prefix stripped
         assert!(has(&q, "limit", "5"));
         assert!(!key(&q, "t"));
@@ -321,14 +428,14 @@ mod tests {
 
     #[test]
     fn listing_top_includes_time_filter() {
-        let (path, q) = listing_request("rust", "top", 10, "week");
+        let (path, q) = listing_request("rust", "top", 10, "week").unwrap();
         assert_eq!(path, "/r/rust/top");
         assert!(has(&q, "t", "week"));
     }
 
     #[test]
     fn search_scoped_sets_restrict_sr() {
-        let (path, q) = search_request("async", Some("rust"), "top", "year", 15, true);
+        let (path, q) = search_request("async", Some("rust"), "top", "year", 15, true).unwrap();
         assert_eq!(path, "/r/rust/search");
         assert!(has(&q, "q", "async"));
         assert!(has(&q, "restrict_sr", "1"));
@@ -337,22 +444,22 @@ mod tests {
 
     #[test]
     fn search_global_has_no_restrict_sr() {
-        let (path, q) = search_request("gpu", None, "relevance", "month", 25, true);
+        let (path, q) = search_request("gpu", None, "relevance", "month", 25, true).unwrap();
         assert_eq!(path, "/search");
         assert!(!key(&q, "restrict_sr"));
     }
 
     #[test]
     fn comments_strips_t3_and_scopes_sub() {
-        let (path, _) = comments_request("t3_1abc", Some("r/rust"), 50);
+        let (path, _) = comments_request("t3_1abc", Some("r/rust"), 50).unwrap();
         assert_eq!(path, "/r/rust/comments/1abc");
-        let (path2, _) = comments_request("1abc", None, 50);
+        let (path2, _) = comments_request("1abc", None, 50).unwrap();
         assert_eq!(path2, "/comments/1abc");
     }
 
     #[test]
     fn about_path() {
-        let (path, _) = about_request("r/rust");
+        let (path, _) = about_request("r/rust").unwrap();
         assert_eq!(path, "/r/rust/about");
     }
 }
